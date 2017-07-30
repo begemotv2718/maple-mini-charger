@@ -23,11 +23,22 @@
 #include <libopencm3/stm32/adc.h>
 #include <libopencm3/cm3/nvic.h>
 
-volatile uint32_t accum=0;
-volatile uint32_t count=0;
-volatile uint32_t count2=0;
-#define ACCUM_VALUE 100
+volatile uint32_t accum_kp=0;
+volatile uint32_t accum_input=0;
+volatile uint32_t count_kp=0;
+volatile uint32_t count_input=0;
+volatile    int32_t K_p=0;
+#define ACCUM_VALUE_KP (100u)
+#define ACCUM_VALUE_INPUT (5u)
+#define SET_VALUE (425)
 volatile uint16_t chans[4];
+#define RING_BUFFER_SIZE 1000
+volatile uint16_t adc_values[RING_BUFFER_SIZE];
+volatile int16_t delta_values[RING_BUFFER_SIZE];
+volatile uint16_t tim_ccr_values[RING_BUFFER_SIZE];
+volatile uint16_t ring_buffer_index=0;
+volatile uint16_t tim_ccr_value=10;
+volatile int ring_write_allowed=1;
 
 
 static void clock_setup(void)
@@ -52,35 +63,58 @@ static void gpio_setup(void)
 	 * 'output alternate function push-pull'.
 	 */
 	gpio_set_mode(GPIOB, GPIO_MODE_OUTPUT_50_MHZ,
-		      GPIO_CNF_OUTPUT_ALTFN_PUSHPULL,
+		      GPIO_CNF_OUTPUT_ALTFN_OPENDRAIN,
 		      GPIO_TIM4_CH1 | GPIO_TIM4_CH2);
 
 
-    gpio_set_mode(GPIOB, GPIO_MODE_OUTPUT_2_MHZ,GPIO_CNF_OUTPUT_PUSHPULL,GPIO0);
+    gpio_set_mode(GPIOB, GPIO_MODE_OUTPUT_2_MHZ,GPIO_CNF_OUTPUT_PUSHPULL,GPIO0|GPIO14|GPIO1);
 }
 
 void adc1_2_isr(void){
     int i;
+    int16_t curr_ccr2;
+    int16_t delta;
+    uint16_t average_adc;
     for(i=1;i<=4;i++){
        chans[i-1]=adc_read_injected(ADC1,i);
     }
-    accum+=chans[0];
+    accum_kp+=chans[0];
+    accum_input+=chans[1];
    // TIM4_CCR2=400;
-    count++;
-    if(count>=ACCUM_VALUE){
-      TIM4_CCR1=300;
-      TIM4_CCR2=accum/ACCUM_VALUE;
-      count=0;
-      accum=0;
-      count2++;
-      if(count2>50000){
-        count2=0;
+    count_kp++;
+    count_input++;
+    if(count_input>=ACCUM_VALUE_INPUT){
+      count_input=0;
+      curr_ccr2=tim_ccr_value;
+      average_adc=accum_input/ACCUM_VALUE_INPUT;
+      delta=(K_p*(SET_VALUE-average_adc))>>10;
+      curr_ccr2+=delta;
+      if(curr_ccr2<0){curr_ccr2=0;}
+      if(curr_ccr2>4095){curr_ccr2=4095;}
+      accum_input=0;
+      gpio_toggle(GPIOB,GPIO0);
+      tim_ccr_value=(uint16_t)curr_ccr2;
+      TIM4_CCR2=tim_ccr_value;
+      if(ring_write_allowed){      
+          adc_values[ring_buffer_index]=average_adc;
+          delta_values[ring_buffer_index]=delta;
+          tim_ccr_values[ring_buffer_index]=curr_ccr2;
+          ring_buffer_index++;
+          if(ring_buffer_index>=RING_BUFFER_SIZE){
+            ring_buffer_index=0;
+          }
       }
+    }
+    if(count_kp>=ACCUM_VALUE_KP){
+      K_p=accum_kp/ACCUM_VALUE_KP;
+      TIM4_CCR1=K_p;
+      gpio_toggle(GPIOB,GPIO1);
+      count_kp=0;
+      accum_kp=0;
     }
 
 
   
-    gpio_toggle(GPIOB,GPIO0);
 
     ADC_SR(ADC1) &= ~ADC_SR_JEOC; // Clear JEOC flag
 }
@@ -144,8 +178,8 @@ static void adc_setup(void){
 
     gpio_set_mode(GPIOA,GPIO_MODE_INPUT,GPIO_CNF_INPUT_ANALOG,GPIO0);
     gpio_set_mode(GPIOA,GPIO_MODE_INPUT,GPIO_CNF_INPUT_ANALOG,GPIO1);
-    gpio_set_mode(GPIOA,GPIO_MODE_INPUT,GPIO_CNF_INPUT_ANALOG,GPIO2);
-    gpio_set_mode(GPIOA,GPIO_MODE_INPUT,GPIO_CNF_INPUT_ANALOG,GPIO3);
+    gpio_set_mode(GPIOA,GPIO_MODE_INPUT,GPIO_CNF_INPUT_ANALOG,GPIO4);
+    gpio_set_mode(GPIOA,GPIO_MODE_INPUT,GPIO_CNF_INPUT_ANALOG,GPIO5);
 
     adc_enable_scan_mode(ADC1);
     adc_set_single_conversion_mode(ADC1);
@@ -156,8 +190,8 @@ static void adc_setup(void){
     uint8_t channels[16];
     channels[0]=ADC_CHANNEL0;
     channels[1]=ADC_CHANNEL1;
-    channels[2]=ADC_CHANNEL2;
-    channels[3]=ADC_CHANNEL3;
+    channels[2]=ADC_CHANNEL4;
+    channels[3]=ADC_CHANNEL5;
     adc_set_injected_sequence(ADC1, 4, channels);
 
     adc_power_on(ADC1);
@@ -170,11 +204,11 @@ static void adc_setup(void){
 
     //adc_enable_eoc_interrupt(ADC1);
     adc_enable_eoc_interrupt_injected(ADC1);
+    gpio_toggle(GPIOB,GPIO1);
 }
 
 int main(void)
 {
-	int i, j0, j1, d0, d1;
 
 	clock_setup();
 	gpio_setup();
