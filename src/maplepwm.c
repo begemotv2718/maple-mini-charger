@@ -23,6 +23,12 @@
 #include <libopencm3/stm32/adc.h>
 #include <libopencm3/cm3/nvic.h>
 
+#include <stdio.h>
+#include <errno.h>
+#include "usart_irq.h"
+int _write(int file, char *ptr, int len);
+
+
 volatile uint32_t accum_kp=0;
 volatile uint32_t accum_input=0;
 volatile uint32_t count_kp=0;
@@ -207,6 +213,57 @@ static void adc_setup(void){
     gpio_toggle(GPIOB,GPIO1);
 }
 
+int _write(int file, char *ptr, int len)
+{
+	int i;
+
+	if (file == 1) {
+		for (i = 0; i < len; i++)
+			usart_putc(ptr[i]);
+		return i;
+	}
+
+	errno = EIO;
+	return -1;
+}
+
+void read_string(int len, char *my_buffer){
+	uint8_t pos=0;
+    uint8_t i;
+    usart_putc('\r');
+    usart_putc('>');
+	//_write(1,"Command> ",sizeof("Command> ")-1);
+	char c=usart_getc();
+	while(c!=13 && pos<len-1){
+		usart_putc(c);
+		if(c!=127/*backspace*/){
+			my_buffer[pos]=c;
+			pos++;
+		}else{
+			my_buffer[pos]=0;
+			if(pos>0) pos--;
+			my_buffer[pos]=0;
+            usart_putc('\033');
+            usart_putc('[');
+            usart_putc('2');
+            usart_putc('K');
+            usart_putc('\r');
+//          printf("\033[2K\r");
+			usart_putc('>');
+            for(i=0;i<pos;i++){
+               usart_putc(my_buffer[i]);
+            } 
+		}
+	  c = usart_getc();
+	}
+    usart_putc('\n');
+    usart_putc('\r');
+	my_buffer[pos]=0;
+	return;
+}
+
+char cmdline[256];
+
 int main(void)
 {
 
@@ -215,12 +272,17 @@ int main(void)
 	tim_setup();
     adc_setup();
     adc_tim_setup();
+    usart_setup();
 
     TIM4_CCR1 = 10000;
 	TIM4_CCR2 = 32767;
     
-    while(1);
-
+    while(1){
+      printf("cmd:\n\r");
+      read_string(255,cmdline);
+      printf("Read data %s\n\r",cmdline);
+    }
+      
 
 	return 0;
 }
