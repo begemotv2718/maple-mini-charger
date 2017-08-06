@@ -28,6 +28,7 @@
 #include <string.h>
 #include "usart_irq.h"
 #include "systick_alarm.h"
+#include "ds_usart.h"
 
 int _write(int file, char *ptr, int len);
 
@@ -36,7 +37,7 @@ volatile uint32_t accum_kp=0;
 volatile uint32_t accum_input=0;
 volatile uint32_t count_kp=0;
 volatile uint32_t count_input=0;
-volatile    int32_t K_p=0;
+volatile    int32_t K_p=351;
 #define ACCUM_VALUE_KP (100u)
 #define ACCUM_VALUE_INPUT (5u)
 #define SET_VALUE (425)
@@ -48,6 +49,7 @@ volatile uint16_t tim_ccr_values[RING_BUFFER_SIZE];
 volatile uint16_t ring_buffer_index=0;
 volatile uint16_t tim_ccr_value=10;
 volatile int ring_write_allowed=1;
+volatile int output_allowed=1;
 
 
 static void clock_setup(void)
@@ -87,10 +89,10 @@ void adc1_2_isr(void){
     for(i=1;i<=4;i++){
        chans[i-1]=adc_read_injected(ADC1,i);
     }
-    accum_kp+=chans[0];
+    //accum_kp+=chans[0];
     accum_input+=chans[1];
    // TIM4_CCR2=400;
-    count_kp++;
+   if(output_allowed){
     count_input++;
     if(count_input>=ACCUM_VALUE_INPUT){
       count_input=0;
@@ -114,13 +116,12 @@ void adc1_2_isr(void){
           }
       }
     }
-    if(count_kp>=ACCUM_VALUE_KP){
-      K_p=accum_kp/ACCUM_VALUE_KP;
-      TIM4_CCR1=K_p;
-      gpio_toggle(GPIOB,GPIO1);
-      count_kp=0;
-      accum_kp=0;
-    }
+   }else{
+     if(TIM4_CCR2>0){
+       TIM4_CCR2=0;
+     }
+     tim_ccr_value=0;
+   }
 
 
   
@@ -281,6 +282,72 @@ static void print_param(void){
   printf("K_p=%ld\r\n",K_p);
 }
 
+uint8_t dallas_data[32];
+const uint8_t dallas_rom_code[]={0x28,0x44,0x0C,0x6C,0x07,0x00,0x00,0x6E};
+
+static void dallas_get_rom(void){
+  if(dallas_reset()==0){
+    printf("No temp measuring device present!\r\n");
+    return;
+  }
+  dallas_data[0]=0x33;
+  dallas_send(dallas_data,1);
+  dallas_recv(dallas_data,8);
+  printf("Rom code: ");
+  for(int i=0;i<8;i++){
+    printf("%02Xh ",dallas_data[i]);
+  }
+}
+
+static void dallas_measure_t(void){
+  if(dallas_reset()==0){
+    printf("No temp measuring device present!\r\n");
+    return;
+  }
+  dallas_data[0]=0xCC;
+  dallas_data[1]=0x44;
+  dallas_send(dallas_data,2);
+}
+
+static void dallas_read_scratch(void){
+  if(dallas_reset()==0){
+    printf("No temp measuring device present!\r\n");
+    return;
+  }
+  dallas_data[0]=0xCC;
+  dallas_data[1]=0xBE;
+  dallas_send(dallas_data,2);
+  dallas_recv(dallas_data,9);
+  printf("Scratchpad values: ");
+  for(int i=0;i<9;i++){
+    printf("%02Xh ",dallas_data[i]);
+  }
+  printf("Temperature: %02d.%04d\r\n",(((uint16_t)dallas_data[1])<<4)+(((uint16_t)dallas_data[0])>>4),(uint16_t)625*(dallas_data[0]&0x0f));
+}
+
+
+static void dallas_read_scratch_prefix(void){
+  int offset=0;
+  if(dallas_reset()==0){
+    printf("No temp measuring device present!\r\n");
+    return;
+  }
+  dallas_data[0]=0x55;
+  for(uint16_t i=0;i<sizeof(dallas_rom_code)/sizeof(dallas_rom_code[0]);i++){
+    offset++;
+    dallas_data[offset]=dallas_rom_code[i];
+  }
+  offset++;
+  dallas_data[offset]=0xBE;
+  offset++;
+  dallas_send(dallas_data,offset);
+  dallas_recv(dallas_data,9);
+  printf("Scratchpad values: ");
+  for(int i=0;i<9;i++){
+    printf("%02Xh ",dallas_data[i]);
+  }
+  printf("Temperature: %02d.%04d\r\n",(((uint16_t)dallas_data[1])<<4)+(((uint16_t)dallas_data[0])>>4),(uint16_t)625*(dallas_data[0]&0x0f));
+}
 static void do_measure(void){
 }
 
@@ -302,6 +369,7 @@ int main(void)
     adc_tim_setup();
     usart_setup();
     systick_setup();
+    dallas_usart_setup();
 
     TIM4_CCR1 = 10000;
 	TIM4_CCR2 = 32767;
@@ -320,6 +388,7 @@ int main(void)
           if(is_systick_timeout()){
             set_systick_timeout(RELAX_TIME);
             gpio_clear(GPIOB,GPIO14);
+            output_allowed=0;
             state=PREPARE_MEASURE;
           }
           if(usart_poll_getc(&data)){
@@ -351,6 +420,7 @@ int main(void)
               do_measure();
               set_systick_timeout(CHARGE_TIME);
               gpio_set(GPIOB,GPIO14);
+              output_allowed=1;
               state=CHARGE;
           }
 
@@ -360,8 +430,16 @@ int main(void)
           read_string(255,cmdline);
           if(strncmp(cmdline,"ring",5)==0){
             print_ring_buf();
-          }else if(strncmp(cmdline,"kp",2)==0){
+          }else if(strncmp(cmdline,"kp",3)==0){
             print_param();
+          }else if(strncmp(cmdline,"rom_code",9)==0){
+            dallas_get_rom();
+          }else if(strncmp(cmdline,"meas_t",7)==0){
+            dallas_measure_t();
+          }else if(strncmp(cmdline,"scratch",8)==0){
+            dallas_read_scratch();
+          }else if(strncmp(cmdline,"scr_prefix",11)==0){
+            dallas_read_scratch_prefix();
           }else if(strncmp(cmdline,"exit",5)==0){
             set_systick_timeout(100000);
             state=CHARGE;
