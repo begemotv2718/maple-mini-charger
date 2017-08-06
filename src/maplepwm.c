@@ -25,7 +25,10 @@
 
 #include <stdio.h>
 #include <errno.h>
+#include <string.h>
 #include "usart_irq.h"
+#include "systick_alarm.h"
+
 int _write(int file, char *ptr, int len);
 
 
@@ -227,7 +230,7 @@ int _write(int file, char *ptr, int len)
 	return -1;
 }
 
-void read_string(int len, char *my_buffer){
+static void read_string(int len, char *my_buffer){
 	uint8_t pos=0;
     uint8_t i;
     usart_putc('\r');
@@ -262,7 +265,32 @@ void read_string(int len, char *my_buffer){
 	return;
 }
 
+static void print_ring_buf(void){
+  int index;
+  ring_write_allowed=0;
+  printf("ADC\t\tdelta\t\ttimer\r\n");
+  for(int i=0;i<100;i++){
+      index=(ring_buffer_index+RING_BUFFER_SIZE-i)%RING_BUFFER_SIZE;
+      printf("%d\t\t%d\t\t%d\r\n",adc_values[index],delta_values[index],tim_ccr_values[index]);
+  }
+  ring_write_allowed=1;
+
+}
+
+static void print_param(void){
+  printf("K_p=%ld\r\n",K_p);
+}
+
+static void do_measure(void){
+}
+
+enum State { START, CHARGE, PREPARE_MEASURE, MEASURE, CMDLINE};
+enum State state=START;
+#define CHARGE_TIME (50000u)
+#define RELAX_TIME (3000u)
+
 char cmdline[256];
+extern volatile uint32_t tick_counter;
 
 int main(void)
 {
@@ -273,14 +301,75 @@ int main(void)
     adc_setup();
     adc_tim_setup();
     usart_setup();
+    systick_setup();
 
     TIM4_CCR1 = 10000;
 	TIM4_CCR2 = 32767;
+
+    uint8_t data;
     
+
     while(1){
-      printf("cmd:\n\r");
-      read_string(255,cmdline);
-      printf("Read data %s\n\r",cmdline);
+      switch(state){
+        case START:
+          set_systick_timeout(CHARGE_TIME);
+          state=CHARGE;
+          gpio_set(GPIOB,GPIO14);
+          break;
+        case CHARGE:
+          if(is_systick_timeout()){
+            set_systick_timeout(RELAX_TIME);
+            gpio_clear(GPIOB,GPIO14);
+            state=PREPARE_MEASURE;
+          }
+          if(usart_poll_getc(&data)){
+            printf("CD:%02X\r\n",(int)data);
+            if('c'==data){
+              state=CMDLINE;
+            }
+          }
+          break;
+        case PREPARE_MEASURE:
+          if(is_systick_timeout()){
+            state=MEASURE;
+          }
+          if(usart_poll_getc(&data)){
+            printf("PD:%02X\r\n",(int)data);
+            if('c'==data){
+              state=CMDLINE;
+            }
+          }
+          break;
+        case MEASURE:
+          if(usart_poll_getc(&data)){
+            printf("MD:%02X\r\n",(int)data);
+            if('c'==data){
+              state=CMDLINE;
+            }
+          }
+          if(CMDLINE!=state){
+              do_measure();
+              set_systick_timeout(CHARGE_TIME);
+              gpio_set(GPIOB,GPIO14);
+              state=CHARGE;
+          }
+
+          break;
+        case CMDLINE:
+          printf("cmd:\n\r");
+          read_string(255,cmdline);
+          if(strncmp(cmdline,"ring",5)==0){
+            print_ring_buf();
+          }else if(strncmp(cmdline,"kp",2)==0){
+            print_param();
+          }else if(strncmp(cmdline,"exit",5)==0){
+            set_systick_timeout(100000);
+            state=CHARGE;
+          }
+          printf("Read data %s\n\r",cmdline);
+        default:
+          break;
+      }
     }
       
 

@@ -1,0 +1,7 @@
+*.d
+*.o
+*.elf
+*.bin
+*.map
+cscope.out
+.gdb_history
