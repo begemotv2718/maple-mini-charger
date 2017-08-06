@@ -1,0 +1,4 @@
+Accumulator charger based on maple-mini board.
+Assumes the board is programmed via st-link programmer, not through dfu.
+
+Not finished yet.
