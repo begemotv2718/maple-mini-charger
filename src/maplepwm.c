@@ -33,12 +33,12 @@
 int _write(int file, char *ptr, int len);
 
 
-volatile uint32_t accum_kp=0;
+volatile uint32_t accum_measure=0;
 volatile uint32_t accum_input=0;
-volatile uint32_t count_kp=0;
+volatile uint32_t count_measure=0;
 volatile uint32_t count_input=0;
 volatile    int32_t K_p=351;
-#define ACCUM_VALUE_KP (100u)
+#define ACCUM_VALUE_MEASURE (1000u)
 #define ACCUM_VALUE_INPUT (5u)
 #define SET_VALUE (425)
 volatile uint16_t chans[4];
@@ -50,6 +50,7 @@ volatile uint16_t ring_buffer_index=0;
 volatile uint16_t tim_ccr_value=10;
 volatile int ring_write_allowed=1;
 volatile int output_allowed=1;
+volatile int measure_in_progress=0;
 
 
 static void clock_setup(void)
@@ -89,39 +90,47 @@ void adc1_2_isr(void){
     for(i=1;i<=4;i++){
        chans[i-1]=adc_read_injected(ADC1,i);
     }
-    //accum_kp+=chans[0];
-    accum_input+=chans[1];
-   // TIM4_CCR2=400;
-   if(output_allowed){
-    count_input++;
-    if(count_input>=ACCUM_VALUE_INPUT){
-      count_input=0;
-      curr_ccr2=tim_ccr_value;
-      average_adc=accum_input/ACCUM_VALUE_INPUT;
-      delta=(K_p*(SET_VALUE-average_adc))>>10;
-      curr_ccr2+=delta;
-      if(curr_ccr2<0){curr_ccr2=0;}
-      if(curr_ccr2>4095){curr_ccr2=4095;}
-      accum_input=0;
-      gpio_toggle(GPIOB,GPIO0);
-      tim_ccr_value=(uint16_t)curr_ccr2;
-      TIM4_CCR2=tim_ccr_value;
-      if(ring_write_allowed){      
-          adc_values[ring_buffer_index]=average_adc;
-          delta_values[ring_buffer_index]=delta;
-          tim_ccr_values[ring_buffer_index]=curr_ccr2;
-          ring_buffer_index++;
-          if(ring_buffer_index>=RING_BUFFER_SIZE){
-            ring_buffer_index=0;
-          }
+    // TIM4_CCR2=400;
+    if(output_allowed){
+      accum_input+=chans[1];
+      count_input++;
+      if(count_input>=ACCUM_VALUE_INPUT){
+        count_input=0;
+        curr_ccr2=tim_ccr_value;
+        average_adc=accum_input/ACCUM_VALUE_INPUT;
+        delta=(K_p*(SET_VALUE-average_adc))>>10;
+        curr_ccr2+=delta;
+        if(curr_ccr2<0){curr_ccr2=0;}
+        if(curr_ccr2>4095){curr_ccr2=4095;}
+        accum_input=0;
+        gpio_toggle(GPIOB,GPIO0);
+        tim_ccr_value=(uint16_t)curr_ccr2;
+        TIM4_CCR2=tim_ccr_value;
+        if(ring_write_allowed){      
+            adc_values[ring_buffer_index]=average_adc;
+            delta_values[ring_buffer_index]=delta;
+            tim_ccr_values[ring_buffer_index]=curr_ccr2;
+            ring_buffer_index++;
+            if(ring_buffer_index>=RING_BUFFER_SIZE){
+              ring_buffer_index=0;
+            }
+        }
+      }
+    }else{
+      if(TIM4_CCR2>0){
+        TIM4_CCR2=0;
+      }
+      tim_ccr_value=0;
+    }
+
+    if(measure_in_progress){
+      accum_measure+=chans[0];
+      count_measure++;
+      if(count_measure>=ACCUM_VALUE_MEASURE){
+        count_measure=0;
+        measure_in_progress=0;
       }
     }
-   }else{
-     if(TIM4_CCR2>0){
-       TIM4_CCR2=0;
-     }
-     tim_ccr_value=0;
-   }
 
 
   
@@ -349,6 +358,31 @@ static void dallas_read_scratch_prefix(void){
   printf("Temperature: %02d.%04d\r\n",(((uint16_t)dallas_data[1])<<4)+(((uint16_t)dallas_data[0])>>4),(uint16_t)625*(dallas_data[0]&0x0f));
 }
 static void do_measure(void){
+  if(dallas_reset()!=0){
+    dallas_data[0]=0xCC;
+    dallas_data[1]=0x44;
+    dallas_send(dallas_data,2);
+  }
+
+  accum_measure=0;
+  measure_in_progress=1;
+  while(measure_in_progress);
+  printf("Measured voltage: %ld",accum_measure*31/40960);
+
+  if(dallas_reset()!=0){
+    int offset=0;
+    dallas_data[0]=0x55;
+    for(uint16_t i=0;i<sizeof(dallas_rom_code)/sizeof(dallas_rom_code[0]);i++){
+      offset++;
+      dallas_data[offset]=dallas_rom_code[i];
+    }
+    offset++;
+    dallas_data[offset]=0xBE;
+    offset++;
+    dallas_send(dallas_data,offset);
+    dallas_recv(dallas_data,9);
+    printf("Temperature: %02d.%04d\r\n",(((uint16_t)dallas_data[1])<<4)+(((uint16_t)dallas_data[0])>>4),(uint16_t)625*(dallas_data[0]&0x0f));
+  }
 }
 
 enum State { START, CHARGE, PREPARE_MEASURE, MEASURE, CMDLINE};
